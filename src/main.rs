@@ -7,7 +7,7 @@ use teloxide::{prelude::*, types::InputFile, utils::command::BotCommands};
 use youtube_dl::{YoutubeDl, YoutubeDlOutput};
 
 const TMP_DIR: &str = "video";
-const DEFAULT_SIZE_LIMIT: u32 = 100;
+const DEFAULT_SIZE_LIMIT: u32 = 50;
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
