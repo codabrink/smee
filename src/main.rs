@@ -1,15 +1,19 @@
+use std::path::PathBuf;
+
 use anyhow::{bail, Result};
 use glob::glob;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use teloxide::{prelude::*, types::InputFile, utils::command::BotCommands};
 use youtube_dl::{YoutubeDl, YoutubeDlOutput};
 
+const TMP_DIR: &str = "video";
+
 #[tokio::main]
 pub async fn main() -> Result<()> {
   let bot = Bot::new(env!("TELEGRAM_BOT_KEY"));
 
-  let _ = std::fs::remove_dir_all("tmp_files");
-  let _ = std::fs::create_dir("tmp_files");
+  let _ = std::fs::remove_dir_all(TMP_DIR);
+  let _ = std::fs::create_dir(TMP_DIR);
 
   Command::repl(bot, answer).await;
 
@@ -17,44 +21,50 @@ pub async fn main() -> Result<()> {
 }
 
 async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
-  match cmd {
+  let chat_id = msg.chat.id;
+
+  let (mode, args) = match cmd {
     Command::Help => {
       bot
         .send_message(msg.chat.id, Command::descriptions().to_string())
         .await?;
+      return Ok(());
     }
-    Command::Video(args) => {
-      let chat_id = msg.chat.id;
-      if let Err(err) = DownloadContext::new(DownloadMode::Video, &bot, msg, args)
-        .run()
-        .await
-      {
-        bot
-          .send_message(chat_id, format!("Error: {:?}", err))
-          .await?;
-      };
-    }
-    Command::Audio(args) => {
-      let chat_id = msg.chat.id;
-      if let Err(err) = DownloadContext::new(DownloadMode::Audio, &bot, msg, args)
-        .run()
-        .await
-      {
-        bot
-          .send_message(chat_id, format!("Error: {:?}", err))
-          .await?;
-      };
-    }
+    Command::Video(args) => (DownloadMode::Video, args),
+    Command::Audio(args) => (DownloadMode::Audio, args),
   };
+
+  let mut context = DownloadContext::new(DownloadMode::Audio, bot.clone(), msg, args);
+  if let Err(err) = context.run().await {
+    bot
+      .send_message(
+        chat_id,
+        format!(
+          "Oh dear. I'm afraid you'll have to see this, cap'n.\n\n{:?}",
+          err
+        ),
+      )
+      .await?;
+  }
+
+  // === CLEANUP ===
+  // delete status message
+  if let Some(msg) = &context.status_msg {
+    bot.delete_message(msg.chat.id, msg.id).await?;
+  }
+  // delete file
+  if let Ok(Some(path)) = context.file() {
+    let _ = std::fs::remove_file(path);
+  }
 
   Ok(())
 }
 
 const DEFAULT_SIZE_LIMIT: u32 = 100;
 
-struct DownloadContext<'a> {
+struct DownloadContext {
   id: String,
-  bot: &'a Bot,
+  bot: Bot,
   msg: Message,
   size_limit: u32,
   url: String,
@@ -67,8 +77,8 @@ enum DownloadMode {
   Audio,
 }
 
-impl<'a> DownloadContext<'a> {
-  fn new(mode: DownloadMode, bot: &'a Bot, msg: Message, args: String) -> Self {
+impl DownloadContext {
+  fn new(mode: DownloadMode, bot: Bot, msg: Message, args: String) -> Self {
     let args: Vec<&str> = args.split(" ").collect();
     Self {
       id: rand_string(5),
@@ -106,9 +116,11 @@ impl<'a> DownloadContext<'a> {
               format!("yt-dlp error: {:?}", err),
             )
             .await?;
+
+          return Ok(());
         }
 
-        bail!("Error: {:?}", err);
+        bail!("Oh dear! Oh no.. Cap'n, look:\n\n{:?}", err);
       }
     };
 
@@ -120,22 +132,23 @@ impl<'a> DownloadContext<'a> {
     if let Some(status_msg) = &self.status_msg {
       self
         .bot
-        .edit_message_text(status_msg.chat.id, status_msg.id, "Uploading...")
+        .edit_message_text(
+          status_msg.chat.id,
+          status_msg.id,
+          "I got the file, sir! Sending it now...",
+        )
         .await?;
     }
 
-    let Some(file_path) = glob(&format!("tmp_files/{}*", self.id))?.nth(0) else {
-      if let Some(status_msg) = &self.status_msg {
-        self.bot.edit_message_text(status_msg.chat.id, status_msg.id, "Could not find downloaded file.").await?;
-      }
-      bail!("Could not find downloaded file.");
+    let Some(file_path) = self.file()? else {
+      bail!("Oh dear.. we lost the downloaded file, cap'n.");
     };
 
     match self.mode {
       DownloadMode::Video => {
         self
           .bot
-          .send_video(self.msg.chat.id, InputFile::file(&file_path?))
+          .send_video(self.msg.chat.id, InputFile::file(&file_path))
           .supports_streaming(true)
           .caption(caption)
           .await?;
@@ -143,7 +156,7 @@ impl<'a> DownloadContext<'a> {
       DownloadMode::Audio => {
         self
           .bot
-          .send_audio(self.msg.chat.id, InputFile::file(&file_path?))
+          .send_audio(self.msg.chat.id, InputFile::file(&file_path))
           .caption(caption)
           .await?;
       }
@@ -159,17 +172,28 @@ impl<'a> DownloadContext<'a> {
     Ok(())
   }
 
+  fn file(&self) -> Result<Option<PathBuf>> {
+    Ok(
+      glob(&format!("{}/{}*", TMP_DIR, self.id))?
+        .nth(0)
+        .map(|pb| pb.unwrap()),
+    )
+  }
+
   async fn download_video_cmd(&mut self) -> Result<YoutubeDl> {
     let status_msg = self
       .bot
       .send_message(
         self.msg.chat.id,
-        format!("Downloading video... ({}MB limit)", self.size_limit),
+        format!(
+          "Aye-aye cap'n! Downloading video with a {}MB filesize limit.",
+          self.size_limit
+        ),
       )
       .await?;
     self.status_msg = Some(status_msg);
 
-    let outfile = format!("tmp_files/{}", self.id);
+    let outfile = format!("{}/{}", TMP_DIR, self.id);
     let dl_cmd = dl_cmd(&self.url, self.size_limit, &outfile)
       .format("mp4")
       .to_owned();
@@ -182,12 +206,15 @@ impl<'a> DownloadContext<'a> {
       .bot
       .send_message(
         self.msg.chat.id,
-        format!("Downloading audio... ({}MB limit)", self.size_limit),
+        format!(
+          "Oh sure, cap'n! I'll get that for you. ({}MB limit)",
+          self.size_limit
+        ),
       )
       .await?;
     self.status_msg = Some(status_msg);
 
-    let outfile = format!("tmp_files/{}.%(ext)s", self.id);
+    let outfile = format!("{}/{}.%(ext)s", TMP_DIR, self.id);
     let dl_cmd = dl_cmd(&self.url, self.size_limit, &outfile)
       .extract_audio(true)
       .to_owned();
@@ -198,9 +225,9 @@ impl<'a> DownloadContext<'a> {
 
 fn dl_cmd(url: &str, size_limit: u32, outfile: &str) -> YoutubeDl {
   let dl_cmd = YoutubeDl::new(url)
-    .output_template(outfile)
     .socket_timeout("15")
     .extra_arg(format!("-S filesize:{}M", size_limit))
+    .output_template(outfile)
     .download(true)
     .to_owned();
 
@@ -223,6 +250,8 @@ fn rand_string(len: usize) -> String {
 enum Command {
   #[command(description = "display this text.")]
   Help,
+  #[command(description = "display this text.")]
+  Start,
   #[command(description = "extract audio from a video here.")]
   Audio(String),
   #[command(description = "mirror a video here.")]
