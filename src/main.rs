@@ -25,7 +25,7 @@ async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
   let chat_id = msg.chat.id;
 
   let (mode, args) = match cmd {
-    Command::Help => {
+    Command::Help | Command::Start => {
       bot
         .send_message(msg.chat.id, Command::descriptions().to_string())
         .await?;
