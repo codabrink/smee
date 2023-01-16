@@ -35,7 +35,7 @@ async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
     Command::Audio(args) => (DownloadMode::Audio, args),
   };
 
-  let mut context = DownloadContext::new(DownloadMode::Audio, bot.clone(), msg, args);
+  let mut context = DownloadContext::new(mode, bot.clone(), msg, args);
   if let Err(err) = context.run().await {
     bot
       .send_message(
