@@ -1,0 +1,19 @@
+[package]
+name = "clippy"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+camino = "1"
+rand = "0.8"
+teloxide = { version = "0.11", features = ["macros"] }
+youtube_dl = { git = "https://github.com/GyrosOfWar/youtube-dl-rs", branch = "rework" }
+anyhow = "1"
+glob = "0.3"
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+strip = true
+lto = true
