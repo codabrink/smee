@@ -1,22 +1,35 @@
+extern crate pretty_env_logger;
+#[macro_use]
+extern crate log;
+
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use glob::glob;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use teloxide::{prelude::*, types::InputFile, utils::command::BotCommands};
+use tokio::join;
 use youtube_dl::{YoutubeDl, YoutubeDlOutput};
+
+mod forward;
 
 const TMP_DIR: &str = "video";
 const DEFAULT_SIZE_LIMIT: u32 = 50;
 
 #[tokio::main]
 pub async fn main() -> Result<()> {
-  let bot = Bot::new(env!("TELEGRAM_BOT_KEY"));
+  pretty_env_logger::init();
+
+  let args: Vec<String> = std::env::args().collect();
 
   let _ = std::fs::remove_dir_all(TMP_DIR);
   let _ = std::fs::create_dir(TMP_DIR);
 
-  Command::repl(bot, answer).await;
+  let bot = Bot::new(env!("TELEGRAM_BOT_KEY"));
+  let _ = join!(
+    Command::repl(bot, answer),
+    forward::forward(args.get(1).map(|a| a.as_str()).unwrap_or("4000"))
+  );
 
   Ok(())
 }
