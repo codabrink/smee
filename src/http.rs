@@ -18,17 +18,22 @@ const FILE_COUNT_LIMIT: usize = 10;
 
 lazy_static! {
   static ref FILE_CACHE: RwLock<(HashMap<String, Vec<u8>>, VecDeque<String>)> = RwLock::default();
+  pub static ref ACME_PROOF: Mutex<String> = Mutex::new(String::from("DEFAULT"));
 }
 
-pub async fn forward(port: &str) -> anyhow::Result<()> {
+pub async fn serve(port: u16) -> anyhow::Result<()> {
   info!("Booting web server...");
   let root = warp::path::end().and_then(root);
-  let proxy = warp::path::param().and_then(proxy);
+  let acme_challenge = warp::path(".well-known")
+    .and(warp::path("acme-challenge"))
+    .and(warp::path::param())
+    .map(|_p: String| ACME_PROOF.lock().clone());
 
-  let routes = root.or(proxy);
+  let vid = warp::path("vid").and(warp::path::param()).and_then(vid);
+  let img = warp::path::param().and_then(img);
 
-  warp::serve(routes)
-    .run(([0, 0, 0, 0], port.parse().unwrap()))
+  warp::serve(warp::get().and(root.or(acme_challenge).or(vid).or(img)))
+    .run(([0, 0, 0, 0], port))
     .await;
 
   Ok(())
@@ -38,30 +43,44 @@ async fn root() -> Result<impl warp::Reply, Infallible> {
   Ok("Hello there.")
 }
 
-async fn proxy(path: String) -> Result<impl warp::Reply, Infallible> {
-  if let Some(val) = FILE_CACHE.read().0.get(&path) {
+async fn vid(path: String) -> Result<impl warp::Reply, Infallible> {
+  proxy("v-kota", &path, "video/mp4").await
+}
+
+async fn img(path: String) -> Result<impl warp::Reply, Infallible> {
+  proxy("i-kota", &path, "image/png").await
+}
+
+async fn proxy(
+  bucket: &str,
+  path: &str,
+  content_type: &str,
+) -> Result<impl warp::Reply, Infallible> {
+  if let Some(val) = FILE_CACHE.read().0.get(path) {
     info!("RETURNED CACHED!");
     return Ok(
       Response::builder()
-        .header("Content-Type", "image/png")
+        .header("Content-Type", content_type)
         .body(Body::from(val.clone()))
         .unwrap(),
     );
   }
 
-  let response = reqwest::get(format!("https://f001.backblazeb2.com/file/i-kota/{}", path))
+  println!("{path}");
+
+  let response = reqwest::get(format!("https://f001.backblazeb2.com/file/{bucket}/{path}"))
     .await
     .unwrap();
   let bytes_stream = response.bytes_stream();
   let cacher = StreamCache {
     stream: Mutex::new(Box::pin(bytes_stream)),
     file: Mutex::default(),
-    path,
+    path: path.to_owned(),
   };
 
   let wrapped_stream = Body::wrap_stream(cacher);
   let response_stream = Response::builder()
-    .header("Content-Type", "image/png")
+    .header("Content-Type", content_type)
     .body(wrapped_stream)
     .unwrap();
 

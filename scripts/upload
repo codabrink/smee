@@ -1,0 +1,5 @@
+#!/bin/sh
+
+ROOT=$(git rev-parse --show-toplevel)
+
+scp $ROOT/target/release/smee root@kota.is:./smee/smee
