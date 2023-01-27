@@ -61,7 +61,7 @@ pub fn request_cert() -> Result<()> {
 
   let pkey_pri = create_p384_key();
   let ord_cert = ord_csr.finalize_pkey(pkey_pri, 5000)?;
-  let cert = ord_cert.download_and_save_cert()?;
+  let _cert = ord_cert.download_and_save_cert()?;
 
   info!("CERT DONE");
 

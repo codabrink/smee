@@ -2,4 +2,6 @@
 
 ROOT=$(git rev-parse --show-toplevel)
 
+cd $ROOT
+cargo build --release --features=tls
 scp $ROOT/target/release/smee root@kota.is:./smee/smee

@@ -14,7 +14,7 @@ use tokio::join;
 use youtube_dl::{YoutubeDl, YoutubeDlOutput};
 
 const TMP_DIR: &str = "video";
-const DEFAULT_SIZE_LIMIT_MB: u32 = 1;
+const DEFAULT_SIZE_LIMIT_MB: u32 = 50;
 const DEFAULT_SIZE_LIMIT: u64 = DEFAULT_SIZE_LIMIT_MB as u64 * 1_000_000;
 
 pub async fn start() {
@@ -159,7 +159,7 @@ impl DownloadContext {
                 break;
               }
 
-              bot
+              let _ = bot
                 .edit_message_text(
                   large_msg.chat.id,
                   large_msg.id,
@@ -174,20 +174,19 @@ impl DownloadContext {
         let s3_path = format!("{}.mp4", self.id);
         let put_vid = crate::backblaze::put_vid(&s3_path, &file_path, progress);
 
-        let (a, b) = join!(update, put_vid);
+        let _ = join!(update, put_vid);
 
         self
           .bot
           .edit_message_text(
             large_msg.chat.id,
             large_msg.id,
-            format!("http://kota.is/vid/{}.mp4", self.id),
+            format!("https://kota.is/v/{}.mp4", self.id),
           )
           .await?;
 
         return Ok(());
       }
-      std::process::exit(0);
 
       self
         .bot

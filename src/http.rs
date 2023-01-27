@@ -15,6 +15,8 @@ use warp::{
 
 const FILESIZE_LIMIT: usize = 5_000_000; // in bytes
 const FILE_COUNT_LIMIT: usize = 10;
+#[cfg(feature = "tls")]
+const LETS_ENCRYPT_ACCOUNT: &str = "17287977548916597336";
 
 lazy_static! {
   static ref FILE_CACHE: RwLock<(HashMap<String, Vec<u8>>, VecDeque<String>)> = RwLock::default();
@@ -23,18 +25,30 @@ lazy_static! {
 
 pub async fn serve(port: u16) -> anyhow::Result<()> {
   info!("Booting web server...");
+
+  // build routes
   let root = warp::path::end().and_then(root);
   let acme_challenge = warp::path(".well-known")
     .and(warp::path("acme-challenge"))
     .and(warp::path::param())
     .map(|_p: String| ACME_PROOF.lock().clone());
-
-  let vid = warp::path("vid").and(warp::path::param()).and_then(vid);
   let img = warp::path::param().and_then(img);
+  let vid = warp::path("v").and(warp::path::param()).and_then(vid);
 
-  warp::serve(warp::get().and(root.or(acme_challenge).or(vid).or(img)))
-    .run(([0, 0, 0, 0], port))
-    .await;
+  // collect routes
+  let routes = warp::get().and(root.or(acme_challenge).or(vid).or(img));
+
+  // build server
+  #[cfg(feature = "tls")]
+  let server = warp::serve(routes)
+    .tls()
+    .cert_path(&format!("{LETS_ENCRYPT_ACCOUNT}_crt_kota_is.crt"))
+    .key_path(&format!("{LETS_ENCRYPT_ACCOUNT}_key_kota_is.key"));
+  #[cfg(not(feature = "tls"))]
+  let server = warp::serve(routes);
+
+  // run server
+  server.run(([0, 0, 0, 0], port)).await;
 
   Ok(())
 }
@@ -43,19 +57,14 @@ async fn root() -> Result<impl warp::Reply, Infallible> {
   Ok("Hello there.")
 }
 
-async fn vid(path: String) -> Result<impl warp::Reply, Infallible> {
+async fn img(path: String) -> Result<Response<Body>, Infallible> {
+  proxy("i-kota", &path, "image/png").await
+}
+async fn vid(path: String) -> Result<Response<Body>, Infallible> {
   proxy("v-kota", &path, "video/mp4").await
 }
 
-async fn img(path: String) -> Result<impl warp::Reply, Infallible> {
-  proxy("i-kota", &path, "image/png").await
-}
-
-async fn proxy(
-  bucket: &str,
-  path: &str,
-  content_type: &str,
-) -> Result<impl warp::Reply, Infallible> {
+async fn proxy(bucket: &str, path: &str, content_type: &str) -> Result<Response<Body>, Infallible> {
   if let Some(val) = FILE_CACHE.read().0.get(path) {
     info!("RETURNED CACHED!");
     return Ok(

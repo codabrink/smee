@@ -22,7 +22,7 @@ pub async fn main() -> Result<()> {
       let _ = cert::request_cert();
     });
   }
-  let _ = join!(smee::start(), http::serve(args.port), async {});
+  let _ = join!(smee::start(), http::serve(args.port));
 
   Ok(())
 }
@@ -30,7 +30,7 @@ pub async fn main() -> Result<()> {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-  #[arg(short, long, default_value_t = 80)]
+  #[arg(short, long, default_value_t = 443)]
   port: u16,
 
   #[arg(short, long)]
