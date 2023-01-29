@@ -1,16 +1,8 @@
 use anyhow::{bail, Result};
 use glob::glob;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
-use std::{
-  path::PathBuf,
-  sync::{
-    atomic::{AtomicU64, Ordering::Relaxed},
-    Arc,
-  },
-  time::Duration,
-};
+use std::path::PathBuf;
 use teloxide::{prelude::*, types::InputFile, utils::command::BotCommands};
-use tokio::join;
 use youtube_dl::{YoutubeDl, YoutubeDlOutput};
 
 const TMP_DIR: &str = "video";
@@ -109,22 +101,7 @@ impl DownloadContext {
 
     let result = match dl_cmd.run() {
       Ok(result) => result,
-      Err(err) => {
-        if let Some(status_msg) = &self.status_msg {
-          self
-            .bot
-            .edit_message_text(
-              status_msg.chat.id,
-              status_msg.id,
-              format!("yt-dlp error: {:?}", err),
-            )
-            .await?;
-
-          return Ok(());
-        }
-
-        bail!("Oh dear! Oh no.. Cap'n, look:\n\n{:?}", err);
-      }
+      Err(err) => bail!("Oh dear! Oh no.. Cap'n, look:\n\n{:?}", err),
     };
 
     let caption = match result {
@@ -143,45 +120,19 @@ impl DownloadContext {
       warn!("FILESIZE: {}", filesize);
 
       if filesize >= DEFAULT_SIZE_LIMIT {
-        let host_msg = "Oh Cap'n, this file is too large for Telegram. Let me host it for you!";
+        let host_msg =
+          "Oh Cap'n, this file is too large for Telegram. Let me host it for you!\n\nUploading...";
         let large_msg = self.bot.send_message(status_msg.chat.id, host_msg).await?;
 
-        let progress = Arc::new(AtomicU64::new(0));
-
-        let update = {
-          let progress = progress.clone();
-
-          let bot = self.bot.clone();
-          async move {
-            loop {
-              let progress = progress.as_ref().load(Relaxed);
-              if progress == 100 {
-                break;
-              }
-
-              let _ = bot
-                .edit_message_text(
-                  large_msg.chat.id,
-                  large_msg.id,
-                  format!("{}\n\n{}%", host_msg, progress),
-                )
-                .await;
-              tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-          }
-        };
-
         let s3_path = format!("{}.mp4", self.id);
-        let put_vid = crate::backblaze::put_vid(&s3_path, &file_path, progress);
-
-        let _ = join!(update, put_vid);
+        crate::backblaze::put_vid(&s3_path, &file_path).await?;
 
         self
           .bot
           .edit_message_text(
             large_msg.chat.id,
             large_msg.id,
-            format!("https://kota.is/v/{}.mp4", self.id),
+            format!("Here it is, Cap'n! https://kota.is/v/{}.mp4", self.id),
           )
           .await?;
 
