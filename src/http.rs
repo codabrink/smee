@@ -58,13 +58,20 @@ async fn root() -> Result<impl warp::Reply, Infallible> {
 }
 
 async fn img(path: String) -> Result<Response<Body>, Infallible> {
-  proxy("i-kota", &path, "image/png").await
+  proxy("i-kota", &path).await
 }
 async fn vid(path: String) -> Result<Response<Body>, Infallible> {
-  proxy("v-kota", &path, "video/mp4").await
+  proxy("v-kota", &path).await
 }
 
-async fn proxy(bucket: &str, path: &str, content_type: &str) -> Result<Response<Body>, Infallible> {
+async fn proxy(bucket: &str, path: &str) -> Result<Response<Body>, Infallible> {
+  let guess = mime_guess::from_path(path).first_or(
+    "application/octet-stream"
+      .parse::<mime_guess::mime::Mime>()
+      .unwrap(),
+  );
+  let content_type = format!("{}/{}", guess.type_(), guess.subtype());
+
   if let Some(val) = FILE_CACHE.read().0.get(path) {
     info!("RETURNED CACHED!");
     return Ok(

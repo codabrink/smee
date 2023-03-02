@@ -198,7 +198,7 @@ impl DownloadContext {
       .await?;
     self.status_msg = Some(status_msg);
 
-    let outfile = format!("{}/{}", TMP_DIR, self.id);
+    let outfile = format!("{}/{}.%(ext)s", TMP_DIR, self.id);
     let dl_cmd = dl_cmd(&self.url, self.size_limit, &outfile)
       .format("mp4")
       .to_owned();
