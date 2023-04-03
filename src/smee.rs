@@ -88,7 +88,7 @@ impl DownloadContext {
 
   fn size_limit(params: &[&str]) -> u32 {
     if let Some(size_limit) = params.get(1) {
-      return size_limit.parse().unwrap();
+      return size_limit.parse().unwrap_or(DEFAULT_SIZE_LIMIT_MB);
     }
     DEFAULT_SIZE_LIMIT_MB
   }
@@ -104,10 +104,11 @@ impl DownloadContext {
       Err(err) => bail!("Oh dear! Oh no.. Cap'n, look:\n\n{:?}", err),
     };
 
-    let caption = match result {
+    let mut caption: String = match result {
       YoutubeDlOutput::SingleVideo(video) => video.title,
       _ => String::from("No Title Found"),
     };
+    caption.truncate(200);
 
     let Some(file_path) = self.file()? else {
       bail!("Oh dear.. we lost the downloaded file, cap'n.");
