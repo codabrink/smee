@@ -1,10 +1,13 @@
 use lazy_static::lazy_static;
 use parking_lot::{Mutex, RwLock};
+use std::path::Path;
 use std::{
   collections::{HashMap, VecDeque},
   convert::Infallible,
   pin::Pin,
   task::{Context, Poll},
+  thread,
+  time::Duration,
 };
 use tokio_stream::Stream;
 use warp::{
@@ -15,7 +18,6 @@ use warp::{
 
 const FILESIZE_LIMIT: usize = 5_000_000; // in bytes
 const FILE_COUNT_LIMIT: usize = 10;
-#[cfg(feature = "tls")]
 const LETS_ENCRYPT_ACCOUNT: &str = "17287977548916597336";
 
 lazy_static! {
@@ -31,24 +33,29 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
   let acme_challenge = warp::path(".well-known")
     .and(warp::path("acme-challenge"))
     .and(warp::path::param())
-    .map(|_p: String| ACME_PROOF.lock().clone());
+    .map(|_p: String| {
+      thread::spawn(|| {
+        thread::sleep(Duration::from_secs(1));
+        std::process::exit(0);
+      });
+      ACME_PROOF.lock().clone()
+    });
   let img = warp::path::param().and_then(img);
   let vid = warp::path("v").and(warp::path::param()).and_then(vid);
 
   // collect routes
   let routes = warp::get().and(root.or(acme_challenge).or(vid).or(img));
 
-  // build server
-  #[cfg(feature = "tls")]
-  let server = warp::serve(routes)
-    .tls()
-    .cert_path(&format!("{LETS_ENCRYPT_ACCOUNT}_crt_kota_is.crt"))
-    .key_path(&format!("{LETS_ENCRYPT_ACCOUNT}_key_kota_is.key"));
-  #[cfg(not(feature = "tls"))]
   let server = warp::serve(routes);
 
-  // run server
-  server.run(([0, 0, 0, 0], port)).await;
+  let cert_file = format!("{LETS_ENCRYPT_ACCOUNT}_crt_kota_is.crt");
+  let key_file = format!("{LETS_ENCRYPT_ACCOUNT}_key_kota_is.key");
+  if Path::new(&cert_file).exists() && Path::new(&key_file).exists() {
+    let server = server.tls().cert_path(cert_file).key_path(key_file);
+    server.run(([0, 0, 0, 0], port)).await;
+  } else {
+    server.run(([0, 0, 0, 0], port)).await;
+  }
 
   Ok(())
 }

@@ -3,6 +3,7 @@ use glob::glob;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use std::path::PathBuf;
 use teloxide::{prelude::*, types::InputFile, utils::command::BotCommands};
+use tokio::runtime::Runtime;
 use youtube_dl::{YoutubeDl, YoutubeDlOutput};
 
 const TMP_DIR: &str = "video";
@@ -29,6 +30,7 @@ async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
     }
     Command::Video(args) => (DownloadMode::Video, args),
     Command::Audio(args) => (DownloadMode::Audio, args),
+    Command::Song(args) => return song(bot, msg, args).await,
   };
 
   let mut context = DownloadContext::new(mode, bot.clone(), msg, args);
@@ -53,6 +55,52 @@ async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
   if let Ok(Some(path)) = context.file() {
     let _ = std::fs::remove_file(path);
   }
+
+  Ok(())
+}
+
+async fn song(bot: Bot, msg: Message, args: String) -> ResponseResult<()> {
+  let response_msg = bot
+    .send_message(
+      msg.chat.id,
+      format!(
+        r#"Aye-aye cap'n! Let me ask the crew if they've heard of a song by the name "{}""#,
+        args
+      ),
+    )
+    .await
+    .unwrap();
+
+  if let Err(err) = song_impl(&bot, &msg, &response_msg, &args).await {
+    bot
+      .edit_message_text(response_msg.chat.id, response_msg.id, format!("{:?}", err))
+      .await
+      .unwrap();
+  }
+
+  Ok(())
+}
+
+async fn song_impl(bot: &Bot, msg: &Message, _respose_msg: &Message, args: &str) -> Result<()> {
+  let bot = bot.clone();
+  let chat_id = msg.chat.id;
+  let args = args.to_owned();
+
+  std::thread::spawn(move || -> Result<()> {
+    let rt = Runtime::new().unwrap();
+
+    rt.block_on(async {
+      let song = crate::music::song(&args).await.unwrap();
+      let input_file = InputFile::memory(song);
+      bot
+        .send_audio(chat_id, input_file)
+        .caption("song.ogg")
+        .await
+        .unwrap();
+    });
+
+    Ok(())
+  });
 
   Ok(())
 }
@@ -262,4 +310,6 @@ enum Command {
   Audio(String),
   #[command(description = "mirror a video here.")]
   Video(String),
+  #[command(description = "does... something?")]
+  Song(String),
 }
