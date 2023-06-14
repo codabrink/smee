@@ -94,11 +94,14 @@ async fn proxy(bucket: &str, path: &str) -> Result<Response<Body>, Infallible> {
   let response = reqwest::get(format!("https://f001.backblazeb2.com/file/{bucket}/{path}"))
     .await
     .unwrap();
+
+  let content_length = response.content_length();
   let bytes_stream = response.bytes_stream();
   let cacher = StreamCache {
     stream: Mutex::new(Box::pin(bytes_stream)),
     file: Mutex::default(),
     path: path.to_owned(),
+    content_length,
   };
 
   let wrapped_stream = Body::wrap_stream(cacher);
@@ -114,6 +117,7 @@ struct StreamCache {
   stream: Mutex<Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + Sync>>>,
   file: Mutex<Vec<u8>>,
   path: String,
+  content_length: Option<u64>,
 }
 
 impl Stream for StreamCache {
@@ -140,15 +144,18 @@ impl Stream for StreamCache {
 impl Drop for StreamCache {
   fn drop(&mut self) {
     let file = std::mem::replace(&mut *self.file.lock(), vec![]);
-    if file.len() < FILESIZE_LIMIT {
-      info!("Cached: {}: {}", &self.path, file.len());
-      let mut cache = FILE_CACHE.write();
-      cache.1.push_front(self.path.clone());
-      cache.0.entry(self.path.clone()).or_insert(file);
 
-      if cache.1.len() > FILE_COUNT_LIMIT {
-        let key = cache.1.pop_back().unwrap();
-        cache.0.remove(&key);
+    if let Some(content_length) = self.content_length {
+      if content_length == file.len() as u64 && file.len() < FILESIZE_LIMIT {
+        info!("Cached: {}: {}", &self.path, file.len());
+        let mut cache = FILE_CACHE.write();
+        cache.1.push_front(self.path.clone());
+        cache.0.entry(self.path.clone()).or_insert(file);
+
+        if cache.1.len() > FILE_COUNT_LIMIT {
+          let key = cache.1.pop_back().unwrap();
+          cache.0.remove(&key);
+        }
       }
     }
   }

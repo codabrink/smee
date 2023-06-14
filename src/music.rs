@@ -22,6 +22,8 @@ pub const PCM_AT_0DBFS: f64 = 1.0;
 // Spotify inserts a custom Ogg packet at the start with custom metadata values, that you would
 // otherwise expect in Vorbis comments. This packet isn't well-formed and players may balk at it.
 const SPOTIFY_OGG_HEADER_END: u64 = 0xa7;
+const SCOPES: &str =
+  "streaming,user-read-playback-state,user-modify-playback-state,user-read-currently-playing";
 
 trait NormalisationDataImportTrait {
   fn parse_from_ogg<T: Read + Seek>(file: T) -> io::Result<NormalisationData>;
@@ -139,11 +141,13 @@ pub fn ratio_to_db(ratio: f64) -> f64 {
 pub async fn song(search: &str) -> anyhow::Result<Vec<u8>> {
   let session_config = SessionConfig::default();
 
-  // TODO: remove pwd
   let credentials = Credentials::with_password(env!("SPOTIFY_USER"), env!("SPOTIFY_PASS"));
 
   let session = Session::new(session_config, None);
   session.connect(credentials, true).await?;
+
+  let token = session.token_provider().get_token(SCOPES).await.unwrap();
+  println!("token: {:?}", token);
 
   let rspotify_creds =
     rspotify::Credentials::new(env!("SPOTIFY_API_ID"), env!("SPOTIFY_API_SECRET"));
