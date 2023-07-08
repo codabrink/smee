@@ -19,42 +19,33 @@ pub async fn start() {
 }
 
 async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
-  let chat_id = msg.chat.id;
-
-  let (mode, args) = match cmd {
+  match cmd {
     Command::Help | Command::Start => {
       bot
         .send_message(msg.chat.id, Command::descriptions().to_string())
         .await?;
       return Ok(());
     }
-    Command::Video(args) => (DownloadMode::Video, args),
-    Command::Audio(args) => (DownloadMode::Audio, args),
-    Command::Song(args) => return song(bot, msg, args).await,
+    Command::Video(args) => {
+      if let Ok(mut interaction) = Interaction::new(bot.clone(), msg, args).await {
+        let _ = interaction.download_video().await;
+        if let Ok(path) = interaction.file() {
+          let _ = std::fs::remove_file(path);
+        }
+      }
+    }
+    Command::Audio(args) => {
+      if let Ok(mut interaction) = Interaction::new(bot.clone(), msg, args).await {
+        let _ = interaction.download_audio().await;
+        if let Ok(path) = interaction.file() {
+          let _ = std::fs::remove_file(path);
+        }
+      }
+    }
+    Command::Song(args) => {
+      let _ = song(bot, msg, args).await;
+    }
   };
-
-  let mut context = DownloadContext::new(mode, bot.clone(), msg, args);
-  if let Err(err) = context.run().await {
-    bot
-      .send_message(
-        chat_id,
-        format!(
-          "Oh dear. I'm afraid you'll have to see this, cap'n.\n\n{:?}",
-          err
-        ),
-      )
-      .await?;
-  }
-
-  // === CLEANUP ===
-  // delete status message
-  if let Some(msg) = &context.status_msg {
-    bot.delete_message(msg.chat.id, msg.id).await?;
-  }
-  // delete file
-  if let Ok(Some(path)) = context.file() {
-    let _ = std::fs::remove_file(path);
-  }
 
   Ok(())
 }
@@ -105,33 +96,70 @@ async fn song_impl(bot: &Bot, msg: &Message, _respose_msg: &Message, args: &str)
   Ok(())
 }
 
-struct DownloadContext {
+struct Interaction {
   id: String,
   bot: Bot,
   msg: Message,
   size_limit: u32,
   url: String,
-  mode: DownloadMode,
-  status_msg: Option<Message>,
+  response: Option<Message>,
 }
 
-enum DownloadMode {
-  Video,
-  Audio,
-}
-
-impl DownloadContext {
-  fn new(mode: DownloadMode, bot: Bot, msg: Message, args: String) -> Self {
+impl Interaction {
+  async fn new(bot: Bot, msg: Message, args: String) -> Result<Self> {
     let args: Vec<&str> = args.split(" ").collect();
-    Self {
+
+    let mut interaction = Self {
       id: rand_string(5),
-      mode,
       bot,
       msg,
       size_limit: Self::size_limit(&args),
-      url: args[0].to_owned(),
-      status_msg: None,
+      url: args[0].trim().to_owned(),
+      response: None,
+    };
+
+    if interaction.url.is_empty() {
+      interaction
+        .respond("Oh sir.. did you mean to give a url? I didn't get one.")
+        .await
+        .unwrap();
+      bail!("No URL");
     }
+
+    Ok(interaction)
+  }
+
+  async fn respond(&mut self, msg: impl AsRef<str>) -> Result<()> {
+    let msg = self
+      .bot
+      .send_message(self.msg.chat.id, msg.as_ref())
+      .await?;
+    self.response = Some(msg);
+
+    Ok(())
+  }
+
+  async fn edit_response(&mut self, msg: impl AsRef<str>) -> Result<()> {
+    if let Some(response) = &self.response {
+      let response = self
+        .bot
+        .edit_message_text(response.chat.id, response.id, msg.as_ref())
+        .await?;
+      self.response = Some(response);
+    } else {
+      self.respond(msg).await?;
+    }
+    Ok(())
+  }
+
+  async fn delete_response(&mut self) -> Result<()> {
+    if let Some(response) = &self.response {
+      self
+        .bot
+        .delete_message(response.chat.id, response.id)
+        .await?;
+    }
+    Ok(())
   }
 
   fn size_limit(params: &[&str]) -> u32 {
@@ -141,12 +169,83 @@ impl DownloadContext {
     DEFAULT_SIZE_LIMIT_MB
   }
 
-  async fn run(&mut self) -> Result<()> {
-    let dl_cmd = match self.mode {
-      DownloadMode::Video => self.download_video_cmd().await?,
-      DownloadMode::Audio => self.download_audio_cmd().await?,
-    };
+  async fn download_audio(&mut self) -> Result<()> {
+    self
+      .respond(format!(
+        "Oh sure, cap'n! I'll get that for you. ({}MB limit)",
+        self.size_limit
+      ))
+      .await?;
 
+    let outfile = format!("{}/{}.%(ext)s", TMP_DIR, self.id);
+    let dl_cmd = dl_cmd(&self.url, self.size_limit, &outfile)
+      .extract_audio(true)
+      .to_owned();
+
+    let (file_path, caption) = self.run_download(&dl_cmd).await?;
+
+    self
+      .edit_response("I got the file, sir! Sending it now...")
+      .await?;
+
+    self
+      .bot
+      .send_audio(self.msg.chat.id, InputFile::file(&file_path))
+      .caption(caption)
+      .await?;
+
+    self.delete_response().await?;
+
+    Ok(())
+  }
+
+  async fn download_video(&mut self) -> Result<()> {
+    self
+      .respond(format!(
+        "Aye-aye cap'n! Downloading video with a {}MB filesize limit.",
+        self.size_limit
+      ))
+      .await?;
+
+    let outfile = format!("{}/{}.%(ext)s", TMP_DIR, self.id);
+    let dl_cmd = dl_cmd(&self.url, self.size_limit, &outfile)
+      .format("mp4")
+      .to_owned();
+
+    let (file_path, caption) = self.run_download(&dl_cmd).await?;
+
+    let file = std::fs::File::open(&file_path)?;
+    let filesize = file.metadata().unwrap().len();
+
+    if filesize >= DEFAULT_SIZE_LIMIT {
+      let host_msg =
+        "Oh Cap'n, this file is too large for Telegram. Let me host it for you!\n\nUploading...";
+      self.edit_response(host_msg).await?;
+
+      let s3_path = format!("{}.mp4", self.id);
+      crate::backblaze::put_vid(&s3_path, &file_path).await?;
+
+      self
+        .edit_response(format!(
+          "Here it is, Cap'n! https://kota.is/v/{}.mp4",
+          self.id
+        ))
+        .await?;
+
+      return Ok(());
+    }
+
+    self
+      .bot
+      .send_video(self.msg.chat.id, InputFile::file(&file_path))
+      .supports_streaming(true)
+      .caption(caption)
+      .await?;
+
+    Ok(())
+  }
+
+  async fn run_download(&mut self, dl_cmd: &YoutubeDl) -> Result<(PathBuf, String)> {
     let result = match dl_cmd.run() {
       Ok(result) => result,
       Err(err) => bail!("Oh dear! Oh no.. Cap'n, look:\n\n{:?}", err),
@@ -158,122 +257,16 @@ impl DownloadContext {
     };
     caption.truncate(200);
 
-    let Some(file_path) = self.file()? else {
-      bail!("Oh dear.. we lost the downloaded file, cap'n.");
-    };
-
-    if let Some(status_msg) = &self.status_msg {
-      let file = std::fs::File::open(&file_path)?;
-      let filesize = file.metadata().unwrap().len();
-
-      warn!("FILESIZE: {}", filesize);
-
-      if filesize >= DEFAULT_SIZE_LIMIT {
-        let host_msg =
-          "Oh Cap'n, this file is too large for Telegram. Let me host it for you!\n\nUploading...";
-        let large_msg = self.bot.send_message(status_msg.chat.id, host_msg).await?;
-
-        let s3_path = format!("{}.mp4", self.id);
-        crate::backblaze::put_vid(&s3_path, &file_path).await?;
-
-        self
-          .bot
-          .edit_message_text(
-            large_msg.chat.id,
-            large_msg.id,
-            format!("Here it is, Cap'n! https://kota.is/v/{}.mp4", self.id),
-          )
-          .await?;
-
-        return Ok(());
-      }
-
-      self
-        .bot
-        .edit_message_text(
-          status_msg.chat.id,
-          status_msg.id,
-          "I got the file, sir! Sending it now...",
-        )
-        .await?;
-    }
-
-    match self.mode {
-      DownloadMode::Video => {
-        self
-          .bot
-          .send_video(self.msg.chat.id, InputFile::file(&file_path))
-          .supports_streaming(true)
-          .caption(caption)
-          .await?;
-      }
-      DownloadMode::Audio => {
-        self
-          .bot
-          .send_audio(self.msg.chat.id, InputFile::file(&file_path))
-          .caption(caption)
-          .await?;
-      }
-    }
-
-    if let Some(status_msg) = &self.status_msg {
-      self
-        .bot
-        .delete_message(status_msg.chat.id, status_msg.id)
-        .await?;
-    }
-
-    Ok(())
+    Ok((self.file()?, caption))
   }
 
-  fn file(&self) -> Result<Option<PathBuf>> {
+  fn file(&self) -> Result<PathBuf> {
     Ok(
       glob(&format!("{}/{}*", TMP_DIR, self.id))?
         .nth(0)
-        .map(|pb| pb.unwrap()),
+        .map(|pb| pb.unwrap())
+        .unwrap(),
     )
-  }
-
-  async fn download_video_cmd(&mut self) -> Result<YoutubeDl> {
-    let status_msg = self
-      .bot
-      .send_message(
-        self.msg.chat.id,
-        format!(
-          "Aye-aye cap'n! Downloading video with a {}MB filesize limit.",
-          self.size_limit
-        ),
-      )
-      .await?;
-    self.status_msg = Some(status_msg);
-
-    let outfile = format!("{}/{}.%(ext)s", TMP_DIR, self.id);
-    let dl_cmd = dl_cmd(&self.url, self.size_limit, &outfile)
-      .format("mp4")
-      .to_owned();
-
-    Ok(dl_cmd)
-  }
-
-  async fn download_audio_cmd(&mut self) -> Result<YoutubeDl> {
-    let status_msg = self
-      .bot
-      .send_message(
-        self.msg.chat.id,
-        format!(
-          "Oh sure, cap'n! I'll get that for you. ({}MB limit)",
-          self.size_limit
-        ),
-      )
-      .await?;
-    self.status_msg = Some(status_msg);
-
-    let outfile = format!("{}/{}.%(ext)s", TMP_DIR, self.id);
-    let dl_cmd = dl_cmd(&self.url, self.size_limit, &outfile)
-      .extract_audio(true)
-      .to_owned();
-
-    Ok(dl_cmd)
   }
 }
 

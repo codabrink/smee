@@ -8,6 +8,7 @@ use librespot::{
   metadata::audio::AudioFileFormat,
   playback::config::PlayerConfig,
 };
+use librespot_core::cache::Cache;
 use librespot_metadata::audio::{AudioFiles, AudioItem};
 use librespot_playback::{
   config::{NormalisationMethod, NormalisationType},
@@ -22,8 +23,6 @@ pub const PCM_AT_0DBFS: f64 = 1.0;
 // Spotify inserts a custom Ogg packet at the start with custom metadata values, that you would
 // otherwise expect in Vorbis comments. This packet isn't well-formed and players may balk at it.
 const SPOTIFY_OGG_HEADER_END: u64 = 0xa7;
-const SCOPES: &str =
-  "streaming,user-read-playback-state,user-modify-playback-state,user-read-currently-playing";
 
 trait NormalisationDataImportTrait {
   fn parse_from_ogg<T: Read + Seek>(file: T) -> io::Result<NormalisationData>;
@@ -138,17 +137,7 @@ pub fn ratio_to_db(ratio: f64) -> f64 {
   ratio.log10() * DB_VOLTAGE_RATIO
 }
 
-pub async fn song(search: &str) -> anyhow::Result<Vec<u8>> {
-  let session_config = SessionConfig::default();
-
-  let credentials = Credentials::with_password(env!("SPOTIFY_USER"), env!("SPOTIFY_PASS"));
-
-  let session = Session::new(session_config, None);
-  session.connect(credentials, true).await?;
-
-  let token = session.token_provider().get_token(SCOPES).await.unwrap();
-  println!("token: {:?}", token);
-
+async fn search(q: &str) -> anyhow::Result<SpotifyId> {
   let rspotify_creds =
     rspotify::Credentials::new(env!("SPOTIFY_API_ID"), env!("SPOTIFY_API_SECRET"));
   let rspotify_client = rspotify::ClientCredsSpotify::new(rspotify_creds);
@@ -156,7 +145,7 @@ pub async fn song(search: &str) -> anyhow::Result<Vec<u8>> {
 
   let search_results = rspotify_client
     .search(
-      search,
+      q,
       rspotify_model::enums::types::SearchType::Track,
       None,
       None,
@@ -174,7 +163,22 @@ pub async fn song(search: &str) -> anyhow::Result<Vec<u8>> {
   let track = track.id.as_ref().unwrap().to_string();
   println!("{}", &track);
 
-  let spotify_id = SpotifyId::from_uri(&track)?;
+  Ok(SpotifyId::from_uri(&track)?)
+}
+
+pub async fn song(q: &str) -> anyhow::Result<Vec<u8>> {
+  let session_config = SessionConfig::default();
+
+  let credentials = Credentials::with_password(env!("SPOTIFY_USER"), env!("SPOTIFY_PASS"));
+  let cache = Cache::new(Some("spotify_session_cache"), None, None, None)?;
+  let session = Session::new(session_config, Some(cache));
+  session.connect(credentials, true).await?;
+
+  let spotify_id = if q.contains("track:") {
+    SpotifyId::from_uri(&format!("spotify:{q}"))?
+  } else {
+    search(q).await?
+  };
 
   // TODO: handle unwrap
   let audio_item = AudioItem::get_file(&session, spotify_id).await.unwrap();
