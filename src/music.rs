@@ -166,7 +166,8 @@ async fn search(q: &str) -> anyhow::Result<SpotifyId> {
   Ok(SpotifyId::from_uri(&track)?)
 }
 
-pub async fn song(q: &str) -> anyhow::Result<Vec<u8>> {
+pub async fn song(q: &[String]) -> anyhow::Result<Vec<u8>> {
+  let q = q.join(" ");
   let session_config = SessionConfig::default();
 
   let credentials = Credentials::with_password(env!("SPOTIFY_USER"), env!("SPOTIFY_PASS"));
@@ -177,7 +178,7 @@ pub async fn song(q: &str) -> anyhow::Result<Vec<u8>> {
   let spotify_id = if q.contains("track:") {
     SpotifyId::from_uri(&format!("spotify:{q}"))?
   } else {
-    search(q).await?
+    search(&q).await?
   };
 
   // TODO: handle unwrap

@@ -14,7 +14,8 @@ pub async fn start() {
   let _ = std::fs::remove_dir_all(TMP_DIR);
   let _ = std::fs::create_dir(TMP_DIR);
 
-  let bot = Bot::new(env!("TELEGRAM_BOT_KEY"));
+  // let bot = Bot::new(env!("TELEGRAM_BOT_KEY"));
+  let bot = Bot::new("6326192895:AAHqizQIGCJYoM5gOfqubOYaxwFkOoEhkOE");
   Command::repl(bot, answer).await;
 }
 
@@ -43,55 +44,11 @@ async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
       }
     }
     Command::Song(args) => {
-      let _ = song(bot, msg, args).await;
+      if let Ok(mut interaction) = Interaction::new(bot.clone(), msg, args).await {
+        let _ = interaction.download_song().await;
+      }
     }
   };
-
-  Ok(())
-}
-
-async fn song(bot: Bot, msg: Message, args: String) -> ResponseResult<()> {
-  let response_msg = bot
-    .send_message(
-      msg.chat.id,
-      format!(
-        r#"Aye-aye cap'n! Let me ask the crew if they've heard of a song by the name "{}""#,
-        args
-      ),
-    )
-    .await
-    .unwrap();
-
-  if let Err(err) = song_impl(&bot, &msg, &response_msg, &args).await {
-    bot
-      .edit_message_text(response_msg.chat.id, response_msg.id, format!("{:?}", err))
-      .await
-      .unwrap();
-  }
-
-  Ok(())
-}
-
-async fn song_impl(bot: &Bot, msg: &Message, _respose_msg: &Message, args: &str) -> Result<()> {
-  let bot = bot.clone();
-  let chat_id = msg.chat.id;
-  let args = args.to_owned();
-
-  std::thread::spawn(move || -> Result<()> {
-    let rt = Runtime::new().unwrap();
-
-    rt.block_on(async {
-      let song = crate::music::song(&args).await.unwrap();
-      let input_file = InputFile::memory(song);
-      bot
-        .send_audio(chat_id, input_file)
-        .caption("song.ogg")
-        .await
-        .unwrap();
-    });
-
-    Ok(())
-  });
 
   Ok(())
 }
@@ -101,24 +58,24 @@ struct Interaction {
   bot: Bot,
   msg: Message,
   size_limit: u32,
-  url: String,
+  args: Vec<String>,
   response: Option<Message>,
 }
 
 impl Interaction {
   async fn new(bot: Bot, msg: Message, args: String) -> Result<Self> {
-    let args: Vec<&str> = args.split(" ").collect();
+    let args: Vec<String> = args.split(" ").map(|a| a.to_owned()).collect();
 
     let mut interaction = Self {
       id: rand_string(5),
       bot,
       msg,
       size_limit: Self::size_limit(&args),
-      url: args[0].trim().to_owned(),
+      args,
       response: None,
     };
 
-    if interaction.url.is_empty() {
+    if interaction.args[0].trim().is_empty() {
       interaction
         .respond("Oh sir.. did you mean to give a url? I didn't get one.")
         .await
@@ -162,11 +119,42 @@ impl Interaction {
     Ok(())
   }
 
-  fn size_limit(params: &[&str]) -> u32 {
+  fn size_limit(params: &[impl AsRef<str>]) -> u32 {
     if let Some(size_limit) = params.get(1) {
-      return size_limit.parse().unwrap_or(DEFAULT_SIZE_LIMIT_MB);
+      return size_limit.as_ref().parse().unwrap_or(DEFAULT_SIZE_LIMIT_MB);
     }
     DEFAULT_SIZE_LIMIT_MB
+  }
+
+  async fn download_song(&mut self) -> Result<()> {
+    self
+      .respond(format!(
+        r#"Aye-aye cap'n! Let me ask the crew if they've heard of a song by the name "{}""#,
+        self.args.join(" ")
+      ))
+      .await?;
+
+    let bot = self.bot.clone();
+    let chat_id = self.msg.chat.id;
+    let args = self.args.clone();
+
+    std::thread::spawn(move || -> Result<()> {
+      let rt = Runtime::new().unwrap();
+
+      rt.block_on(async {
+        let song = crate::music::song(&args).await.unwrap();
+        let input_file = InputFile::memory(song);
+        bot
+          .send_audio(chat_id, input_file)
+          .caption("song.ogg")
+          .await
+          .unwrap();
+      });
+
+      Ok(())
+    });
+
+    Ok(())
   }
 
   async fn download_audio(&mut self) -> Result<()> {
@@ -178,7 +166,7 @@ impl Interaction {
       .await?;
 
     let outfile = format!("{}/{}.%(ext)s", TMP_DIR, self.id);
-    let dl_cmd = dl_cmd(&self.url, self.size_limit, &outfile)
+    let dl_cmd = dl_cmd(&self.args[0], self.size_limit, &outfile)
       .extract_audio(true)
       .to_owned();
 
@@ -208,7 +196,7 @@ impl Interaction {
       .await?;
 
     let outfile = format!("{}/{}.%(ext)s", TMP_DIR, self.id);
-    let dl_cmd = dl_cmd(&self.url, self.size_limit, &outfile)
+    let dl_cmd = dl_cmd(&self.args[0], self.size_limit, &outfile)
       .format("mp4")
       .to_owned();
 
