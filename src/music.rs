@@ -1,5 +1,7 @@
 use anyhow::bail;
+use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
+use crossbeam_channel::{bounded, Receiver};
 use librespot::{
   audio::{AudioDecrypt, AudioFile},
   core::{
@@ -15,7 +17,7 @@ use librespot_playback::{
   player::NormalisationData,
 };
 use rspotify::clients::BaseClient;
-use rspotify_model::SearchResult;
+use rspotify_model::{FullTrack, SearchResult};
 use std::io::{self, Read, Seek, SeekFrom};
 
 pub const DB_VOLTAGE_RATIO: f64 = 20.0;
@@ -23,6 +25,149 @@ pub const PCM_AT_0DBFS: f64 = 1.0;
 // Spotify inserts a custom Ogg packet at the start with custom metadata values, that you would
 // otherwise expect in Vorbis comments. This packet isn't well-formed and players may balk at it.
 const SPOTIFY_OGG_HEADER_END: u64 = 0xa7;
+
+pub async fn search(q: impl AsRef<str>) -> Result<Vec<FullTrack>> {
+  let rspotify_creds =
+    rspotify::Credentials::new(env!("SPOTIFY_API_ID"), env!("SPOTIFY_API_SECRET"));
+  let rspotify_client = rspotify::ClientCredsSpotify::new(rspotify_creds);
+  rspotify_client.request_token().await.unwrap();
+
+  let search_results = rspotify_client
+    .search(
+      q.as_ref(),
+      rspotify_model::enums::types::SearchType::Track,
+      None,
+      None,
+      None,
+      None,
+    )
+    .await?;
+
+  let SearchResult::Tracks(tracks) = search_results else {
+    bail!("No tracks");
+  };
+
+  Ok(tracks.items)
+}
+
+fn full_track_to_spotify_id(full_track: &FullTrack) -> Result<SpotifyId> {
+  let Some(id) = &full_track.id else {
+    bail!("No Track id found.")
+  };
+
+  Ok(SpotifyId::from_uri(&id.to_string())?)
+}
+
+pub async fn dl(track_id: impl AsRef<str>) -> Result<Vec<u8>> {
+  let spotify_id = SpotifyId::from_uri(&format!("spotify:track:{}", track_id.as_ref()))?;
+  download(spotify_id).await
+}
+
+pub fn dl_thread(track_id: impl AsRef<str>) -> Receiver<Vec<u8>> {
+  let (tx, rx) = bounded(1);
+  let track_id = track_id.as_ref().to_owned();
+
+  let _ = tokio::task::block_in_place(move || {
+    tokio::runtime::Handle::current().block_on(async move { tx.send(dl(track_id).await.unwrap()) })
+  });
+
+  rx
+}
+
+pub async fn dl_search(q: impl AsRef<str>) -> Result<Vec<u8>> {
+  let spotify_id = full_track_to_spotify_id(&search(&q).await?[0])?;
+  download(spotify_id).await
+}
+
+async fn download(spotify_id: SpotifyId) -> Result<Vec<u8>> {
+  let cache = Cache::new(Some("spotify_session_cache"), None, None, None)?;
+  let credentials = match cache.credentials() {
+    Some(credentials) => credentials,
+    _ => Credentials::with_password(env!("SPOTIFY_USER"), env!("SPOTIFY_PASS")),
+  };
+  let session = Session::new(SessionConfig::default(), Some(cache));
+  session.connect(credentials, true).await?;
+
+  // TODO: handle unwrap
+  let audio_item = AudioItem::get_file(&session, spotify_id).await.unwrap();
+
+  let format = AudioFileFormat::OGG_VORBIS_320;
+
+  // TODO: handle unwrap
+  let file_id = audio_item.files.get(&format).unwrap();
+
+  let encrypted_file = AudioFile::open(&session, *file_id, 40).await?;
+  let stream_loader_controller = encrypted_file.get_stream_loader_controller()?;
+  let key = session.audio_key().request(spotify_id, *file_id).await?;
+
+  let mut decrypted_file = AudioDecrypt::new(Some(key), encrypted_file);
+
+  let is_ogg_vorbis = AudioFiles::is_ogg_vorbis(format);
+  let (offset, _normalisation_data) = if is_ogg_vorbis {
+    // Spotify stores normalisation data in a custom Ogg packet instead of Vorbis comments.
+
+    let normalisation_data = NormalisationData::parse_from_ogg(&mut decrypted_file).ok();
+    (SPOTIFY_OGG_HEADER_END, normalisation_data)
+  } else {
+    (0, None)
+  };
+
+  let mut audio_file = Subfile::new(
+    decrypted_file,
+    offset,
+    stream_loader_controller.len() as u64,
+  )?;
+
+  let mut buf = vec![];
+  audio_file.read_to_end(&mut buf)?;
+  Ok(buf)
+}
+
+struct Subfile<T: Read + Seek> {
+  stream: T,
+  offset: u64,
+  length: u64,
+}
+
+impl<T: Read + Seek> Subfile<T> {
+  pub fn new(mut stream: T, offset: u64, length: u64) -> Result<Subfile<T>, io::Error> {
+    let target = SeekFrom::Start(offset);
+    stream.seek(target)?;
+
+    Ok(Subfile {
+      stream,
+      offset,
+      length,
+    })
+  }
+}
+
+impl<T: Read + Seek> Read for Subfile<T> {
+  fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    self.stream.read(buf)
+  }
+}
+
+impl<T: Read + Seek> Seek for Subfile<T> {
+  fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+    let pos = match pos {
+      SeekFrom::Start(offset) => SeekFrom::Start(offset + self.offset),
+      SeekFrom::End(offset) => {
+        if (self.length as i64 - offset) < self.offset as i64 {
+          return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "newpos would be < self.offset",
+          ));
+        }
+        pos
+      }
+      _ => pos,
+    };
+
+    let newpos = self.stream.seek(pos)?;
+    Ok(newpos - self.offset)
+  }
+}
 
 trait NormalisationDataImportTrait {
   fn parse_from_ogg<T: Read + Seek>(file: T) -> io::Result<NormalisationData>;
@@ -135,129 +280,4 @@ pub fn db_to_ratio(db: f64) -> f64 {
 
 pub fn ratio_to_db(ratio: f64) -> f64 {
   ratio.log10() * DB_VOLTAGE_RATIO
-}
-
-async fn search(q: &str) -> anyhow::Result<SpotifyId> {
-  let rspotify_creds =
-    rspotify::Credentials::new(env!("SPOTIFY_API_ID"), env!("SPOTIFY_API_SECRET"));
-  let rspotify_client = rspotify::ClientCredsSpotify::new(rspotify_creds);
-  rspotify_client.request_token().await.unwrap();
-
-  let search_results = rspotify_client
-    .search(
-      q,
-      rspotify_model::enums::types::SearchType::Track,
-      None,
-      None,
-      Some(1),
-      None,
-    )
-    .await?;
-
-  let SearchResult::Tracks(tracks) = search_results else {
-    bail!("No tracks");
-  };
-  let tracks = tracks.items;
-  let track = &tracks[0];
-
-  let track = track.id.as_ref().unwrap().to_string();
-  println!("{}", &track);
-
-  Ok(SpotifyId::from_uri(&track)?)
-}
-
-pub async fn song(q: &[String]) -> anyhow::Result<Vec<u8>> {
-  let q = q.join(" ");
-  let session_config = SessionConfig::default();
-
-  let credentials = Credentials::with_password(env!("SPOTIFY_USER"), env!("SPOTIFY_PASS"));
-  let cache = Cache::new(Some("spotify_session_cache"), None, None, None)?;
-  let session = Session::new(session_config, Some(cache));
-  session.connect(credentials, true).await?;
-
-  let spotify_id = if q.contains("track:") {
-    SpotifyId::from_uri(&format!("spotify:{q}"))?
-  } else {
-    search(&q).await?
-  };
-
-  // TODO: handle unwrap
-  let audio_item = AudioItem::get_file(&session, spotify_id).await.unwrap();
-
-  let format = AudioFileFormat::OGG_VORBIS_320;
-
-  // TODO: handle unwrap
-  let file_id = audio_item.files.get(&format).unwrap();
-
-  let encrypted_file = AudioFile::open(&session, *file_id, 40).await?;
-  let stream_loader_controller = encrypted_file.get_stream_loader_controller()?;
-  let key = session.audio_key().request(spotify_id, *file_id).await?;
-
-  let mut decrypted_file = AudioDecrypt::new(Some(key), encrypted_file);
-
-  let is_ogg_vorbis = AudioFiles::is_ogg_vorbis(format);
-  let (offset, _normalisation_data) = if is_ogg_vorbis {
-    // Spotify stores normalisation data in a custom Ogg packet instead of Vorbis comments.
-
-    let normalisation_data = NormalisationData::parse_from_ogg(&mut decrypted_file).ok();
-    (SPOTIFY_OGG_HEADER_END, normalisation_data)
-  } else {
-    (0, None)
-  };
-
-  let mut audio_file = Subfile::new(
-    decrypted_file,
-    offset,
-    stream_loader_controller.len() as u64,
-  )?;
-
-  let mut buf = vec![];
-  audio_file.read_to_end(&mut buf)?;
-  Ok(buf)
-}
-
-struct Subfile<T: Read + Seek> {
-  stream: T,
-  offset: u64,
-  length: u64,
-}
-
-impl<T: Read + Seek> Subfile<T> {
-  pub fn new(mut stream: T, offset: u64, length: u64) -> Result<Subfile<T>, io::Error> {
-    let target = SeekFrom::Start(offset);
-    stream.seek(target)?;
-
-    Ok(Subfile {
-      stream,
-      offset,
-      length,
-    })
-  }
-}
-
-impl<T: Read + Seek> Read for Subfile<T> {
-  fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-    self.stream.read(buf)
-  }
-}
-
-impl<T: Read + Seek> Seek for Subfile<T> {
-  fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-    let pos = match pos {
-      SeekFrom::Start(offset) => SeekFrom::Start(offset + self.offset),
-      SeekFrom::End(offset) => {
-        if (self.length as i64 - offset) < self.offset as i64 {
-          return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "newpos would be < self.offset",
-          ));
-        }
-        pos
-      }
-      _ => pos,
-    };
-
-    let newpos = self.stream.seek(pos)?;
-    Ok(newpos - self.offset)
-  }
 }

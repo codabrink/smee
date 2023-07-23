@@ -1,5 +1,7 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use glob::glob;
+use lazy_static::lazy_static;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use std::path::PathBuf;
 use teloxide::{prelude::*, types::InputFile, utils::command::BotCommands};
@@ -10,12 +12,17 @@ const TMP_DIR: &str = "video";
 const DEFAULT_SIZE_LIMIT_MB: u32 = 50;
 const DEFAULT_SIZE_LIMIT: u64 = DEFAULT_SIZE_LIMIT_MB as u64 * 1_000_000;
 
+lazy_static! {
+  static ref DELAYED_CMD: (Sender<u64>, Receiver<u64>) = unbounded();
+}
+
 pub async fn start() {
   let _ = std::fs::remove_dir_all(TMP_DIR);
   let _ = std::fs::create_dir(TMP_DIR);
 
-  // let bot = Bot::new(env!("TELEGRAM_BOT_KEY"));
-  let bot = Bot::new("6326192895:AAHqizQIGCJYoM5gOfqubOYaxwFkOoEhkOE");
+  let bot = Bot::new(env!("TELEGRAM_BOT_KEY"));
+  // let bot = Bot::new("6326192895:AAHqizQIGCJYoM5gOfqubOYaxwFkOoEhkOE");
+
   Command::repl(bot, answer).await;
 }
 
@@ -29,7 +36,11 @@ async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
     }
     Command::Video(args) => {
       if let Ok(mut interaction) = Interaction::new(bot.clone(), msg, args).await {
-        let _ = interaction.download_video().await;
+        if let Err(err) = interaction.download_video().await {
+          let _ = interaction.edit_response(format!("Oh my.. {err:?}")).await;
+        } else {
+          let _ = interaction.delete_response().await;
+        }
         if let Ok(path) = interaction.file() {
           let _ = std::fs::remove_file(path);
         }
@@ -38,6 +49,7 @@ async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
     Command::Audio(args) => {
       if let Ok(mut interaction) = Interaction::new(bot.clone(), msg, args).await {
         let _ = interaction.download_audio().await;
+        let _ = interaction.delete_response().await;
         if let Ok(path) = interaction.file() {
           let _ = std::fs::remove_file(path);
         }
@@ -115,6 +127,7 @@ impl Interaction {
         .bot
         .delete_message(response.chat.id, response.id)
         .await?;
+      self.response = None;
     }
     Ok(())
   }
@@ -142,7 +155,7 @@ impl Interaction {
       let rt = Runtime::new().unwrap();
 
       rt.block_on(async {
-        let song = crate::music::song(&args).await.unwrap();
+        let song = crate::music::dl_search(args.join(" ")).await.unwrap();
         let input_file = InputFile::memory(song);
         bot
           .send_audio(chat_id, input_file)
@@ -171,6 +184,30 @@ impl Interaction {
       .to_owned();
 
     let (file_path, caption) = self.run_download(&dl_cmd).await?;
+
+    let file = std::fs::File::open(&file_path)?;
+    let filesize = file.metadata().unwrap().len();
+
+    if filesize >= DEFAULT_SIZE_LIMIT {
+      let host_msg =
+        "Oh Cap'n, this file is too large for Telegram. Let me host it for you!\n\nUploading...";
+      self.edit_response(host_msg).await?;
+
+      let extension = file_path.extension().unwrap().to_string_lossy();
+
+      let s3_path = format!("{}.{extension}", self.id);
+      crate::backblaze::put_vid(&s3_path, &file_path).await?;
+
+      self
+        .edit_response(format!(
+          "Here it is, Cap'n! https://kota.is/v/{}.{extension}",
+          self.id
+        ))
+        .await?;
+      self.response = None;
+
+      return Ok(());
+    }
 
     self
       .edit_response("I got the file, sir! Sending it now...")
@@ -219,9 +256,14 @@ impl Interaction {
           self.id
         ))
         .await?;
+      self.response = None;
 
       return Ok(());
     }
+
+    self
+      .edit_response("I got the file, sir! Sending it now...")
+      .await?;
 
     self
       .bot
@@ -234,10 +276,7 @@ impl Interaction {
   }
 
   async fn run_download(&mut self, dl_cmd: &YoutubeDl) -> Result<(PathBuf, String)> {
-    let result = match dl_cmd.run() {
-      Ok(result) => result,
-      Err(err) => bail!("Oh dear! Oh no.. Cap'n, look:\n\n{:?}", err),
-    };
+    let result = dl_cmd.run()?;
 
     let mut caption: String = match result {
       YoutubeDlOutput::SingleVideo(video) => video.title,
@@ -249,17 +288,16 @@ impl Interaction {
   }
 
   fn file(&self) -> Result<PathBuf> {
-    Ok(
-      glob(&format!("{}/{}*", TMP_DIR, self.id))?
-        .nth(0)
-        .map(|pb| pb.unwrap())
-        .unwrap(),
-    )
+    glob(&format!("{}/{}*", TMP_DIR, self.id))?
+      .nth(0)
+      .map(|pb| pb.unwrap())
+      .context("No download found.")
   }
 }
 
 fn dl_cmd(url: &str, size_limit: u32, outfile: &str) -> YoutubeDl {
   let dl_cmd = YoutubeDl::new(url)
+    .cookies("cookies.txt")
     .socket_timeout("15")
     .extra_arg(format!("-S filesize:{}M", size_limit))
     .output_template(outfile)

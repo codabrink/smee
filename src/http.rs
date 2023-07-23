@@ -1,5 +1,7 @@
+use crate::music::{dl_thread, search};
 use lazy_static::lazy_static;
 use parking_lot::{Mutex, RwLock};
+use rspotify_model::idtypes::Id;
 use std::path::Path;
 use std::{
   collections::{HashMap, VecDeque},
@@ -42,9 +44,15 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
     });
   let img = warp::path::param().and_then(img);
   let vid = warp::path("v").and(warp::path::param()).and_then(vid);
+  let song = warp::path("song-priv")
+    .and(warp::query::<HashMap<String, String>>())
+    .and_then(song);
+  let dl_song = warp::path("song-priv")
+    .and(warp::path::param())
+    .and_then(dl_song);
 
   // collect routes
-  let routes = warp::get().and(root.or(acme_challenge).or(vid).or(img));
+  let routes = warp::get().and(root.or(dl_song).or(song).or(acme_challenge).or(vid).or(img));
 
   let server = warp::serve(routes);
 
@@ -69,6 +77,57 @@ async fn img(path: String) -> Result<Response<Body>, Infallible> {
 }
 async fn vid(path: String) -> Result<Response<Body>, Infallible> {
   proxy("v-kota", &path).await
+}
+
+async fn dl_song(track: String) -> Result<Response<Body>, Infallible> {
+  let rx = dl_thread(track);
+  let sleep_for = Duration::from_secs(1);
+
+  let ogg = loop {
+    if let Ok(ogg) = rx.try_recv() {
+      break ogg;
+    }
+    tokio::time::sleep(sleep_for).await;
+  };
+
+  let response = Response::builder()
+    .header("Content-Type", "audio/ogg")
+    .body(Body::from(ogg))
+    .unwrap();
+  Ok(response)
+}
+
+const SONG_HTML: &'static str = include_str!("web/song.html");
+
+async fn song(params: HashMap<String, String>) -> Result<Response<Body>, Infallible> {
+  // let song_html = std::fs::read_to_string("src/web/song.html").unwrap();
+  let results = match params.get("q") {
+    Some(q) => {
+      let results = search(q).await.unwrap();
+      results
+        .iter()
+        .map(|r| {
+          format!(
+            r#"<a href="/song-priv/{}" class="p-2 rounded-md cursor-pointer transition-all hover:bg-slate-500 hover:text-white">{} - {}</a>"#,
+            r.id.as_ref().map(|t| t.id()).unwrap_or(""),
+            r.artists
+              .iter()
+              .map(|a| a.name.clone())
+              .collect::<Vec<String>>()
+              .join(", "),
+            r.name
+          )
+        })
+        .collect()
+    }
+    _ => vec![],
+  };
+
+  let results = results.join("<br />");
+
+  let song_html = SONG_HTML.replace("{results}", &results);
+
+  Ok(Response::builder().body(Body::from(song_html)).unwrap())
 }
 
 async fn proxy(bucket: &str, path: &str) -> Result<Response<Body>, Infallible> {

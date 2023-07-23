@@ -25,6 +25,7 @@ pub async fn main() -> Result<()> {
       let _ = cert::request_cert();
     });
   }
+
   let _ = join!(smee::start(), http::serve(args.port));
 
   Ok(())
