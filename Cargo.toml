@@ -10,29 +10,40 @@ youtube_dl = "0.8"
 anyhow = "1"
 glob = "0.3"
 tokio = { version = "1", features = ["full"] }
-pretty_env_logger = "0.4"
+pretty_env_logger = "0.5"
 log = "0.4"
 parking_lot = "0.12"
 clap = { version = "4.1", features = ["derive"] }
+crossbeam-channel = "0.5"
 
 # proxy related
 reqwest = { version = "0.11", features = ["stream"] }
-warp = { version = "0.3" }
+warp = { version = "0.3", features = ["tls"] }
 tokio-stream = "0.1"
 futures = "0.3"
 lazy_static = "1.4"
 async-stream = "0.3"
 acme-lib = "*"
 
+# music
+librespot = { git = "https://github.com/librespot-org/librespot.git" }
+librespot-core = { git = "https://github.com/librespot-org/librespot.git" }
+librespot-metadata = { git = "https://github.com/librespot-org/librespot.git" }
+librespot-connect = { git = "https://github.com/librespot-org/librespot.git" }
+librespot-protocol = { git = "https://github.com/librespot-org/librespot.git" }
+librespot-playback = { git = "https://github.com/librespot-org/librespot.git" }
+byteorder = "*"
+rspotify = { version = "0.11", features = ["client-reqwest"] }
+rspotify-model = "0.11"
+
 # backblaze
-rust-s3 = "0.32"
+rust-s3 = "0.33"
 aws-region = "0.25"
 mime_guess = "2"
 
 [features]
 default = []
-tls = ["warp/tls"]
 
 [profile.release]
-strip = true
-lto = true
+# strip = true
+# lto = true

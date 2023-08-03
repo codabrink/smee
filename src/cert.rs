@@ -6,7 +6,6 @@ pub fn request_cert() -> Result<()> {
   let persist = FilePersist::new(".");
   let dir = Directory::from_url(persist, url)?;
   let acc = dir.account("pub@kota.is")?;
-
   let mut ord_new = acc.new_order("kota.is", &[])?;
 
   // If the ownership of the domain(s) have already been
@@ -63,7 +62,5 @@ pub fn request_cert() -> Result<()> {
   let ord_cert = ord_csr.finalize_pkey(pkey_pri, 5000)?;
   let _cert = ord_cert.download_and_save_cert()?;
 
-  info!("CERT DONE");
-
-  Ok(())
+  std::process::exit(0);
 }

@@ -9,19 +9,23 @@ use tokio::join;
 mod backblaze;
 mod cert;
 mod http;
+mod music;
 mod smee;
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::main]
 pub async fn main() -> Result<()> {
   pretty_env_logger::init();
 
-  let args = Args::parse();
+  let mut args = Args::parse();
 
   if args.cert {
+    // override the port
+    args.port = 80;
     std::thread::spawn(|| {
       let _ = cert::request_cert();
     });
   }
+
   let _ = join!(smee::start(), http::serve(args.port));
 
   Ok(())
