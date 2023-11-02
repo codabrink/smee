@@ -13,4 +13,4 @@ Smee is a general assistant / vps service that does a handful of useful things f
 
 ### License
 
-No license. Public domain. The only right I withhold is if you copy some of this source code, and it somehow causes your cat to die or something, you can't sue me --- use at your own risk.
+No license. Public domain. Do whatever you want with it. The only right I reserve is you can't sue me if something goes wrong by using my code.
